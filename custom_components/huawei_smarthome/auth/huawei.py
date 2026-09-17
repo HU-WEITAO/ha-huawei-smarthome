@@ -41,7 +41,6 @@ from ..errors import (
 )
 from ..domain.models import AuthSession
 from .interface import (
-    CHALLENGE_KIND_SMS,
     ChallengeChannel,
     LoginChallenge,
     LoginStart,
@@ -81,9 +80,8 @@ CAS_PAGE_NAME = "login"
 # challenge's channel code uses 2 or 6 for the same SMS channel, and passing the
 # channel code through makes the tier answer 70001201 UserAccount not match UserID!
 CAS_ACCOUNT_TYPE_PHONE = "2"
-
-CHALLENGE_SEND_OPER_TYPES = {"sms": "8", "email": "9"}
-CHALLENGE_SEND_REQUEST_TYPES = {"sms": "6", "email": "6"}
+CAS_SMS_OPER_TYPE = "8"
+CAS_SMS_REQUEST_TYPE = "6"
 
 # Several Set-Cookie headers are folded into one value with this separator,
 # because HttpResponse.headers is a flat mapping.
@@ -223,18 +221,13 @@ class HuaweiSmartHomeAuthProvider:
         result_code = _first(fields, "resultCode")
         if response.status < 400 and result_code == "0":
             return LoginStart(session=self._finish_login(account, fields))
-        _LOGGER.warning(
-            "Huawei SmartHome login response: status=%s resultCode=%s errorDesc=%s",
-            response.status,
-            result_code,
-            _first(fields, "errorDesc"),
-        )
-
         channels = _extract_channels(fields)
         if not channels:
             _LOGGER.warning(
-                "Huawei SmartHome login rejected without a challenge: %s",
-                _first(fields, "errorDesc"),
+                "Huawei SmartHome login rejected without a challenge: "
+                "status=%s resultCode=%s",
+                response.status,
+                result_code,
             )
             raise InvalidCredentialsError("Huawei SmartHome account login rejected")
         selected = _default_channel(channels)
@@ -316,19 +309,17 @@ class HuaweiSmartHomeAuthProvider:
                     "userAccount": account,
                     "accountType": CAS_ACCOUNT_TYPE_PHONE,
                     "mobilePhone": phone,
-                    "operType": CHALLENGE_SEND_OPER_TYPES[CHALLENGE_KIND_SMS],
-                    "smsReqType": CHALLENGE_SEND_REQUEST_TYPES[CHALLENGE_KIND_SMS],
+                    "operType": CAS_SMS_OPER_TYPE,
+                    "smsReqType": CAS_SMS_REQUEST_TYPE,
                     "siteID": CAS_SITE_ID,
                 },
             )
             payload = _json_object_or_none(response.body)
             if not _cas_call_failed(response.status, payload):
-                _LOGGER.warning(
-                    "Huawei SmartHome dispatched the SMS code over the account "
-                    "web tier"
-                )
                 return
             last_error = _cas_error_text(payload, response.status)
+            if not _cas_failure_is_explicit(payload):
+                raise AuthenticationError(last_error)
         raise AuthenticationError(last_error)
 
     def _cas_open_session(self) -> None:
@@ -446,9 +437,9 @@ class HuaweiSmartHomeAuthProvider:
         fields = _parse_form(response.body)
         if response.status >= 400 or _first(fields, "resultCode") != "0":
             _LOGGER.warning(
-                "Huawei SmartHome challenge rejected (status=%s): %s",
+                "Huawei SmartHome challenge rejected: status=%s resultCode=%s",
                 response.status,
-                _first(fields, "errorDesc"),
+                _first(fields, "resultCode"),
             )
             raise InvalidCredentialsError("Huawei SmartHome challenge rejected")
         return self._finish_login(pending.account, fields)
@@ -873,10 +864,6 @@ def _extract_channels(
     items = details.get("authCodeSentList") if isinstance(details, dict) else None
     if not isinstance(items, list):
         return ()
-    _LOGGER.warning(
-        "Huawei SmartHome authCodeSentList: %s",
-        json.dumps(items, ensure_ascii=False),
-    )
     channels: list[ChallengeChannel] = []
     for item in items:
         if not isinstance(item, dict):
@@ -961,16 +948,56 @@ def _json_object_or_none(body: bytes) -> dict[str, Any] | None:
 
 
 def _cas_call_failed(status: int, payload: Mapping[str, Any] | None) -> bool:
-    """Decide whether an account web tier call refused the request."""
+    """Decide whether a CAS call failed or returned an unknown response."""
 
-    if status >= 400:
+    if not 200 <= status < 300:
         return True
-    if payload is None:
-        return False
-    if str(payload.get("isSuccess", "1")) == "0":
+    if not isinstance(payload, Mapping):
         return True
+
     error_code = payload.get("errorCode")
-    return bool(error_code) and str(error_code) not in ("0", "None")
+    if error_code is not None and not _cas_success_code(error_code):
+        return True
+
+    success = payload.get("isSuccess")
+    if success is not None:
+        return not _cas_success_value(success)
+
+    result_code = payload.get("resultCode")
+    if result_code is not None:
+        return not _cas_success_code(result_code)
+    return error_code is None
+
+
+def _cas_success_value(value: Any) -> bool:
+    """Return whether a CAS success flag explicitly represents success."""
+
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value == 1
+    return str(value).strip().lower() in {"1", "true", "ok", "success"}
+
+
+def _cas_success_code(value: Any) -> bool:
+    """Return whether a CAS result/error code explicitly represents success."""
+
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return value in {0, 200}
+    return str(value).strip().lower() in {"0", "200", "ok", "success"}
+
+
+def _cas_failure_is_explicit(payload: Mapping[str, Any] | None) -> bool:
+    """Return whether a failed CAS response provides a retryable status."""
+
+    if not isinstance(payload, Mapping):
+        return False
+    return any(
+        payload.get(key) is not None
+        for key in ("isSuccess", "resultCode", "errorCode")
+    )
 
 
 def _cas_error_text(payload: Mapping[str, Any] | None, status: int) -> str:
