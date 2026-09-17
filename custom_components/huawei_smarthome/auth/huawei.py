@@ -77,8 +77,10 @@ CAS_LANGUAGE = "zh-cn"
 CAS_SITE_ID = "1"
 CAS_PAGE_INFO_ACTION = "login/getPageInfo"
 CAS_PAGE_NAME = "login"
-CAS_SESSION_CODE_KEY = "sms_login_session_ramdom_code_key"
-CAS_MAX_SEND_ATTEMPTS = 6
+# The web tier wants the account identifier type here (2 = phone number). The
+# challenge's channel code uses 2 or 6 for the same SMS channel, and passing the
+# channel code through makes the tier answer 70001201 UserAccount not match UserID!
+CAS_ACCOUNT_TYPE_PHONE = "2"
 
 CHALLENGE_SEND_OPER_TYPES = {"sms": "8", "email": "9"}
 CHALLENGE_SEND_REQUEST_TYPES = {"sms": "6", "email": "6"}
@@ -288,6 +290,10 @@ class HuaweiSmartHomeAuthProvider:
         """
 
         self._cas_open_session()
+        # The page token stays valid for the whole session. Re-fetching it between
+        # attempts drops the loginFlowContext the web tier resolves the account
+        # from, after which every later attempt answers "Can't get user
+        # information from loginFlowContext session".
         self._refresh_cas_tokens()
         self._cas_ajax(
             "chkRisk",
@@ -301,32 +307,29 @@ class HuaweiSmartHomeAuthProvider:
             },
         )
 
-        attempts = _cas_send_attempts(channel, account)
+        candidates = _sms_phone_candidates(channel.name, account)
         last_error = "unknown error"
-        for index, values in enumerate(attempts, start=1):
-            self._refresh_cas_tokens()
+        for phone in candidates:
             response = self._cas_ajax(
                 "getSMSCodeV3",
                 {
                     "userAccount": account,
-                    "accountType": channel.account_type,
+                    "accountType": CAS_ACCOUNT_TYPE_PHONE,
+                    "mobilePhone": phone,
+                    "operType": CHALLENGE_SEND_OPER_TYPES[CHALLENGE_KIND_SMS],
+                    "smsReqType": CHALLENGE_SEND_REQUEST_TYPES[CHALLENGE_KIND_SMS],
                     "siteID": CAS_SITE_ID,
-                    **values,
                 },
             )
             payload = _json_object_or_none(response.body)
             if not _cas_call_failed(response.status, payload):
                 _LOGGER.warning(
                     "Huawei SmartHome dispatched the SMS code over the account "
-                    "web tier (attempt %d/%d)",
-                    index,
-                    len(attempts),
+                    "web tier"
                 )
                 return
             last_error = _cas_error_text(payload, response.status)
-        raise AuthenticationError(
-            f"Huawei SmartHome code dispatch failed: {last_error}"
-        )
+        raise AuthenticationError(last_error)
 
     def _cas_open_session(self) -> None:
         """Prime the CAS web session so the dispatch call carries a JSESSIONID."""
@@ -918,47 +921,24 @@ def _channel_prompt(channel: ChallengeChannel) -> str:
     return f"请在已登录的华为设备(通道 {label})上查看挑战码"
 
 
-def _phone_candidates(masked: str, account: str) -> list[str]:
-    """Order the phone spellings the web tier accepts, most likely first."""
+def _sms_phone_candidates(masked: str, account: str) -> list[str]:
+    """Phone spellings to offer the web tier, most likely first.
+
+    The challenge only exposes a masked number, and Huawei's own login page
+    submits the country-prefixed form, so that is kept as the fallback. The list
+    stays deliberately short: the web tier rate limits repeated dispatch
+    requests inside a single login flow.
+    """
 
     candidates = [masked]
     digits = re.sub(r"\D", "", account)
     if digits:
-        candidates.append(digits)
-        if not digits.startswith("00"):
-            candidates.append(f"0086{digits}")
+        candidates.append(f"0086{digits}")
     ordered: list[str] = []
     for value in candidates:
         if value and value not in ordered:
             ordered.append(value)
     return ordered
-
-
-def _cas_send_attempts(
-    channel: ChallengeChannel,
-    account: str,
-) -> list[dict[str, str]]:
-    """Build the ordered request variants that can make Huawei send the SMS.
-
-    The challenge only exposes a masked phone number, and Huawei accepts more
-    than one parameter spelling for this action, so both dimensions are tried
-    until one is accepted.
-    """
-
-    base = {
-        "operType": CHALLENGE_SEND_OPER_TYPES[CHALLENGE_KIND_SMS],
-        "smsReqType": CHALLENGE_SEND_REQUEST_TYPES[CHALLENGE_KIND_SMS],
-    }
-    variants = [
-        dict(base),
-        {**base, "service": CAS_SERVICE},
-        {**base, "service": CAS_SERVICE, "session_code_key": CAS_SESSION_CODE_KEY},
-    ]
-    attempts: list[dict[str, str]] = []
-    for phone in _phone_candidates(channel.name, account):
-        for variant in variants:
-            attempts.append({**variant, "mobilePhone": phone})
-    return attempts[:CAS_MAX_SEND_ATTEMPTS]
 
 
 def _account_type_code(account: str) -> str:
