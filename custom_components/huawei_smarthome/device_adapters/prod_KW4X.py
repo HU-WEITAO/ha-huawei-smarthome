@@ -1,12 +1,40 @@
-"""User-contributed protocol for Huawei product KW02.
+"""Product adapter for the Huawei SmartLock SE (KW4X, 华为智能门锁 SE).
 
-Product: HUAWEI SmartLock Pro (deviceModel ``AGS-X10``, prodId ``KW02``).
-Profile: https://smarthome-drcn.dbankcdn.com/device/guide/KW02/KW02.json
+Product: 华为智能门锁 SE (deviceModel ``AGS-L10``, prodId ``KW4X``,
+manufacturer 华为).  Profile: https://smarthome-drcn.dbankcdn.com/device/guide/KW4X/KW4X.json
 
-Every entity and command below is derived only from the fields declared by
-that public Profile.  Service IDs, enum values and value ranges are read
-from the Profile at runtime so an unexpected product revision degrades to a
-missing entity instead of a wrong state.
+Sibling of the SmartLock Pro (KW02 / AGS-X10) and of the SE with camera
+(KW38 / AGS-S10): all three Profiles declare the **same 20 services with the
+same characteristics**, including an identical eight-field ``event`` service.
+The entity set, command payloads and event decoding mirror the KW02 adapter.
+
+Differences from the KW02 Profile (only ``volumeSetting``, which this adapter
+does not map):
+
+    KW02: currentRing, endTime, keyVolume, nightModeSwitch, ringVolume,
+          startTime, supportedRing, voiceVolume
+    KW4X: the same eight plus warningVolume
+    KW38: the same eight plus warningVolume and homeGreetVol
+
+The KW38 adapter in this repository is otherwise identical; the two are kept
+separate because the repository's convention is one file per prodId.
+
+Verification status -- read this before trusting the entities:
+
+    This adapter has NOT been verified on a KW4X device.  It was written from
+    the Profile plus the KW02 implementation, and the maintainer has no
+    AGS-L10 available.  The structural claims above were checked by comparing
+    the Profiles field by field; the runtime behaviour (which services the
+    firmware actually pushes) was not.
+
+    The battery source is the one place where that distinction matters, because
+    the known members of this family disagree: KW02's firmware never pushes the
+    Profile's ``doorBattery``/``catEyeBattery`` and reports both levels through
+    ``batteryManager`` instead, while KW5J reads them from the Profile's
+    services.  A dual-source reader is used here so either behaviour works, and
+    either source reporting nothing yields an unknown battery rather than a
+    wrong number.  If you run this on real hardware, the reported service list
+    is the thing worth reporting back.
 """
 
 from __future__ import annotations
@@ -34,9 +62,22 @@ _LOCK_STATUS_FIELD = "status"
 # The readings were confirmed against the lock itself and they line up with the
 # field names: the rechargeable lithium pack is the one at 60%, the dry cells
 # are the ones at 85%.
+# Battery readings, two possible sources.
+#
+# The Profile declares doorBattery.level (lock body) and catEyeBattery.level
+# (camera), and KW5J reads them there.  KW02's firmware never pushes either --
+# both levels arrive through batteryManager, which its Profile does not declare
+# at all.  KW38 is unverified, so both sources are consulted: the Profile's own
+# services first (they are what the vendor documents for this product), then
+# batteryManager as the fallback KW02 proved exists in this family.
 _BATTERY_SID = "batteryManager"
 _LITHIUM_BATTERY_FIELD = "lithiumBatteryLevel"
 _DRY_BATTERY_FIELD = "accumulatorBatteryLevel"
+
+# Profile-declared sources, tried first.
+_DOOR_BATTERY_SID = "doorBattery"
+_CAT_EYE_BATTERY_SID = "catEyeBattery"
+_BATTERY_LEVEL_FIELD = "level"
 
 _LOCK_ALARM_SID = "lockAlarm"
 _LOCK_ALARM_FIELD = "alarm"
@@ -69,7 +110,7 @@ _DOOR_ALARM_FIELD = "das"
 _USER_OPERATION_PROFILE_FIELD = "userOperation"
 _DOOR_ALARM_PROFILE_FIELD = "doorAlarmState"
 
-# lockStatus/status values declared by the KW02 Profile.
+# lockStatus/status values declared by this family's Profile (all three agree).
 _STATUS_DOOR_AJAR_LOCKED = 1  # 门未关异常上锁
 _STATUS_UNLOCKED = 2  # 已开锁
 _STATUS_LOCKED = 3  # 已上锁
@@ -89,7 +130,7 @@ _DOOR_CLOSED_STATUSES = frozenset(
     {_STATUS_LOCKED, _STATUS_DOOR_CLOSED, _STATUS_DEADBOLTED}
 )
 
-# Every lockStatus value the Profile declares.  AGS-X10 firmware also reports 7,
+# Every lockStatus value the Profile declares.  This family's firmware also reports 7,
 # which the Profile does not describe and the vendor App has no label for:
 # observed only for the 2-7 s between 已上锁 and 已开锁 when the door is opened
 # with the interior knob or a key (the interior handle, 室内一握开锁, goes straight to
@@ -100,7 +141,7 @@ _DOOR_CLOSED_STATUSES = frozenset(
 # which is what the vendor App shows too.
 _DECLARED_STATUSES = _LOCKED_STATUSES | _UNLOCKED_STATUSES
 
-# lockAlarm/alarm values declared by the KW02 Profile.
+# lockAlarm/alarm values declared by this family's Profile.
 _ALARM_LOW_BATTERY = 2  # 低电量告警
 
 # The lock registers the lockAlarm service but never publishes a value for it:
@@ -128,7 +169,7 @@ _ALARM_PULSE_WINDOW = timedelta(hours=12)
 _BATTERY_UNKNOWN = -1
 
 # event.userOperation values that describe a deliberate unlock.
-# The Profile declares 24 = 门内开锁, but AGS-X10 firmware never sends 24: the
+# The Profile declares 24 = 门内开锁, but this family's firmware never sends 24:
 # interior handle arrives as 35 and the interior knob as 37.  Verified from the
 # wire -- both arrive with lockStatus.status = 2 (已开锁), carry no userName and
 # no credential (uic = 0), and follow 25 (反锁) / 26 (解除反锁) when the door was
@@ -225,7 +266,7 @@ def _operation_label(field: Mapping[str, Any], value: Any) -> str | None:
 
 # The Profile declares lockStatus/status as method=RW, so this adapter is
 # entitled to register lock and unlock actions -- and a first version did.
-# AGS-X10 firmware accepts that write and then ignores it: the lock itself acks
+# The firmware accepts that write and then ignores it: the lock itself acks
 # the command with errcode=0 and immediately re-reports its unchanged status,
 # so the door never moves.  The vendor App (华为智慧生活) exposes no remote unlock
 # for this product either, and the securitySetting.enableRemoteUnlock = 1 it
@@ -290,12 +331,46 @@ def _lock_status_spec(
     )
 
 
-def _battery_spec(field: str, key: str, name: str) -> EntitySpec:
-    def state(device: DeviceContext) -> Mapping[str, Any]:
-        value = _number(device.value(_BATTERY_SID, field))
+def _read_battery(
+    device: DeviceContext,
+    profile_sid: str,
+    fallback_field: str,
+) -> int | None:
+    """Return a battery percentage, trying the Profile's service first.
+
+    Two sources are possible in this family and the adapter cannot know which
+    one a given firmware uses:
+
+    * the Profile's own ``doorBattery``/``catEyeBattery`` (what the vendor
+      documents for KW38, and what KW5J reads), and
+    * ``batteryManager``, which KW02's firmware uses although its Profile does
+      not declare it.
+
+    The Profile's service is tried first because it is the documented one.  A
+    reading of -1 means "not present" for these fields (the Profile declares
+    min = -1 for exactly that reason) and is treated as absent rather than as
+    a percentage.  When neither source has a usable value the caller reports
+    unknown -- never a guess.
+    """
+
+    for sid, field_name in ((profile_sid, _BATTERY_LEVEL_FIELD), (_BATTERY_SID, fallback_field)):
+        if not device.has_service(sid):
+            continue
+        value = _number(device.value(sid, field_name))
         if value is None or value <= _BATTERY_UNKNOWN:
-            return {"native_value": None}
-        return {"native_value": value}
+            continue
+        return int(value)
+    return None
+
+
+def _battery_spec(
+    profile_sid: str,
+    fallback_field: str,
+    key: str,
+    name: str,
+) -> EntitySpec:
+    def state(device: DeviceContext) -> Mapping[str, Any]:
+        return {"native_value": _read_battery(device, profile_sid, fallback_field)}
 
     return EntitySpec(
         platform="sensor",
@@ -444,7 +519,7 @@ def _event_record(device: DeviceContext) -> Mapping[str, Any]:
     if isinstance(parsed, Mapping):
         record.update(parsed)
     _LOGGER.debug(
-        "KW02 event record: event=%s eventData=%s merged=%s",
+        "KW4X event record: event=%s eventData=%s merged=%s",
         device.service_state(_EVENT_SID),
         raw,
         record,
@@ -692,10 +767,10 @@ def _door_alarm_spec(profile: Mapping[str, Any]) -> EntitySpec:
     )
 
 
-class ProductKW02Adapter:
-    """HUAWEI SmartLock Pro (AGS-X10) entity and command choices."""
+class ProductKW4XAdapter:
+    """HUAWEI SmartLock SE (AGS-L10) entity and command choices."""
 
-    prod_id = "KW02"
+    prod_id = "KW4X"
 
     def entities(self, context: DeviceContext) -> tuple[EntitySpec, ...]:
         profile = context.profile
@@ -708,12 +783,20 @@ class ProductKW02Adapter:
             _lock_status_spec(profile, read_status),
             _door_spec(read_status),
         ]
-        if context.has_service(_BATTERY_SID):
+        if (
+            context.has_service(_DOOR_BATTERY_SID)
+            or context.has_service(_CAT_EYE_BATTERY_SID)
+            or context.has_service(_BATTERY_SID)
+        ):
             entities.append(
-                _battery_spec(_LITHIUM_BATTERY_FIELD, "lithium_battery", "锂电池电量")
+                _battery_spec(
+                    _DOOR_BATTERY_SID, _LITHIUM_BATTERY_FIELD, "lithium_battery", "锂电池电量"
+                )
             )
             entities.append(
-                _battery_spec(_DRY_BATTERY_FIELD, "dry_battery", "干电池电量")
+                _battery_spec(
+                    _CAT_EYE_BATTERY_SID, _DRY_BATTERY_FIELD, "dry_battery", "干电池电量"
+                )
             )
         if context.has_service(_LOCK_ALARM_SID):
             entities.append(_alarm_spec(profile))
@@ -738,14 +821,14 @@ class ProductKW02Adapter:
 # ---------------------------------------------------------------------------
 # Read-only reporting entities.
 #
-# AGS-X10 firmware reports far more than the public Profile declares: the lock
+# An AGS-X10 (KW02) was observed reporting far more than its Profile declares:
 # pushes 42 services while the Profile documents 21.  The entities below are
 # read-only projections of services the lock was observed to report on a real
 # device; nothing here writes to the lock and no command is offered, so no
 # unverified write can reach the hardware.
 #
 # Wire details confirmed against the lock (deviating from the Profile):
-#   update           currentVersion is a firmware string ("AGS-X10 5.0.0.1(SP65C00)").
+#   update           currentVersion is a firmware string (e.g. "AGS-X10 5.0.0.1(SP65C00)").
 #                    The Profile's update.action is deliberately not exposed.
 #   users            userList carries every enrolled member (un = name).
 #   keyOperate       keyName names the credential used last ("人脸 01").
@@ -901,4 +984,4 @@ def _reader_based_specs(context: DeviceContext) -> list[EntitySpec]:
     ]
 
 
-ADAPTER = ProductKW02Adapter()
+ADAPTER = ProductKW4XAdapter()

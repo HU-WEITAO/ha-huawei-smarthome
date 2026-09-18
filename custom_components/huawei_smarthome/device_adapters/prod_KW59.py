@@ -1,12 +1,69 @@
-"""User-contributed protocol for Huawei product KW02.
+"""User-contributed protocol for Huawei product KW59 (华为智能门锁E211).
 
-Product: HUAWEI SmartLock Pro (deviceModel ``AGS-X10``, prodId ``KW02``).
-Profile: https://smarthome-drcn.dbankcdn.com/device/guide/KW02/KW02.json
+Product: 华为智能门锁E211 (deviceModel ``AGS-E211``, prodId ``KW59``,
+deviceTypeId ``A0B``, manufacturer 华为).
+Profile: https://smarthome-drcn.dbankcdn.com/device/guide/KW59/KW59.json
 
-Every entity and command below is derived only from the fields declared by
-that public Profile.  Service IDs, enum values and value ranges are read
-from the Profile at runtime so an unexpected product revision degrades to a
-missing entity instead of a wrong state.
+Family member of the SmartLock series already covered by this repository
+(KW02 / AGS-X10, KW5L, and the KW38/KW4X set from PR #82).  The Profile
+declares the same 20 services; ``lockStatus`` and ``event`` carry identical
+enum spaces.  All entity logic mirrors the KW02 adapter.
+
+Verification status -- every read below was checked against a live wire
+snapshot of a real AGS-E211 (services the lock actually reported):
+
+    lockStatus.status   4 -> 已关门 (updateTime travels alongside)
+    batteryManager      lithiumBatteryLevel=22, accumulatorBatteryLevel=92,
+                        lpmStatus=0 -- pushed although the Profile does not
+                        declare the service at all
+    doorBattery/catEyeBattery / lockAlarm / faces(空)
+                        declared by the Profile, never pushed (the KW02
+                        pitfall, confirmed on this model too)
+    netInfo             intensity=100, RSSI=-41
+    update              currentVersion "AGS-E211 5.0.0.1(SP43C00)"
+    event               {"eid":"2991","das":-1,"up":200,"aid":
+                        "...MOTION_DETECTION_...","uic":0} -- 猫眼移动侦测;
+                        the aid token identifies it (up=200 is outside the
+                        Profile enum, like KW02's loitering 201)
+    eventData           {"uic":0,"up":43,"eid":"3013","das":-1} -- 43 is
+                        outside the Profile enum (0-33); it arrived one
+                        second before lockStatus -> 已关门 with no alarm and
+                        no credential, so it reads as a door-close-class
+                        operation.  It is deliberately NOT labelled and NOT
+                        classified as an unlock; if the vendor App ever shows
+                        a name for 43 it can be added as a verified label.
+    doorEvent           {"eventType":1,"id":1,"event":7,"userName":"Chris"}
+                        -- the event code space is undocumented, so only
+                        userName is read.
+    lastActionTime      time "20260915T232350Z" (SmartHome stamp)
+    users/fingers/ciphers/watchs/walletKeys
+                        roster lists pushed on the wire (keyCards/faces
+                        declared but empty so far)
+
+Unverified on this model (family-informed, kept from KW02/KW38):
+
+    * unlock operation codes.  0-7 and 24 (门内开锁) come from this product's
+      Profile; 35 (室内一握开锁) / 37 (旋钮或钥匙开锁) are codes the KW02
+      firmware was observed to use for interior unlocks.  CONFIRMED on the
+      AGS-E211 (2026-09-17, real-door test, full automation chain verified):
+      an interior knob unlock reported the KW02 code 37 and an outdoor
+      fingerprint unlock reported the Profile code 0 -- 开门方向 / 最近开门
+      方式 / 门锁事件 all updated correctly for both.
+    * the automatic re-lock after an unlock reports up=43 on this lock (the
+      unlabelled door-close-class code above), not KW02's 38: the logbook
+      shows lockStatus returning to 已关门 with no lock event.  38 stays in
+      the lock set on family evidence; 43 deliberately produces nothing.
+    * alarm labels (das 1-15) come from the Profile enum; only das=-1 (无
+      告警) has been observed on the wire so far.
+
+Read-only on purpose: the Profile declares lockStatus and update.action as
+RW, but on the KW02 the firmware acks such writes and ignores them (假成功),
+and the vendor App exposes no remote control for the series either.  The lock
+entity therefore registers explicit refusal actions -- HA always renders
+上锁/解锁 buttons, and pressing them raises a self-explanatory error instead
+of the generic "adapter action is unavailable" or, far worse, a silent fake
+success.  The refusal never sends anything to the lock (covered by a test),
+and OTA stays unmapped entirely.
 """
 
 from __future__ import annotations
@@ -26,20 +83,34 @@ _LOGGER = logging.getLogger(__name__)
 _LOCK_STATUS_SID = "lockStatus"
 _LOCK_STATUS_FIELD = "status"
 
-# The Profile declares doorBattery.level and catEyeBattery.level, but the lock
-# never pushes either service.  Both batteries arrive together through the
-# batteryManager service that the device does report:
-#   lithiumBatteryLevel     -> 锂电池电量 (60% on this lock, the lock body)
-#   accumulatorBatteryLevel -> 干电池电量 (85% on this lock, the cat eye)
-# The readings were confirmed against the lock itself and they line up with the
-# field names: the rechargeable lithium pack is the one at 60%, the dry cells
-# are the ones at 85%.
+# Battery readings, two possible sources in this family.
+#
+# The Profile declares doorBattery.level (lock body) and catEyeBattery.level
+# (cat eye), and the KW5J firmware reads them there.  On the AGS-E211 (and
+# KW02) neither service is ever pushed -- both levels arrive through
+# batteryManager, which the Profile does not declare at all:
+#   lithiumBatteryLevel     -> 锂电池电量 (锁体)
+#   accumulatorBatteryLevel -> 干电池电量 (猫眼)
+# Both sources are consulted: the Profile's own services first (they are what
+# the vendor documents for this product), then batteryManager as the fallback
+# this lock was observed to use.  Wire check on the AGS-E211: batteryManager
+# is the live source (lithium 22%, dry 92%).
 _BATTERY_SID = "batteryManager"
 _LITHIUM_BATTERY_FIELD = "lithiumBatteryLevel"
 _DRY_BATTERY_FIELD = "accumulatorBatteryLevel"
 
+# Profile-declared battery services, tried first (never pushed on this lock).
+_DOOR_BATTERY_SID = "doorBattery"
+_CAT_EYE_BATTERY_SID = "catEyeBattery"
+_BATTERY_LEVEL_FIELD = "level"
+
+# The dry-cell warning rides batteryManager.lpmStatus; doorAlarmState travels
+# with the event record.  The Profile's lockAlarm service is registered but
+# never pushed (empty body on every known family member).
 _LOCK_ALARM_SID = "lockAlarm"
 _LOCK_ALARM_FIELD = "alarm"
+_BATTERY_LPM_FIELD = "lpmStatus"
+_LPM_ACTIVE = 1
 
 _NET_INFO_SID = "netInfo"
 _NET_INFO_FIELD = "intensity"
@@ -48,14 +119,12 @@ _NET_INFO_FIELD = "intensity"
 # but the lock pushes them on the wire under the short names below, split over
 # two service ids:
 #
-#   sid="eventData"  {"data": "{\"uic\":5,\"type\":0,\"rt\":0,\"up\":2,...}"}
-#        sent for every event; ``data`` is a JSON string and its ``up`` carries
-#        the Profile userOperation code.
-#   sid="event"      {"eid":"...","un":"<userName>","cl":"18:22","up":201,...}
-#        sent only for credential unlocks, because it is the copy that carries
-#        the user name.  Its ``up`` lives in a different code space (201 for a
-#        credential unlock, never a Profile value), so it is merged first and
-#        contributes ``un``/``cl`` only.
+#   sid="eventData"  {"data": "{\"uic\":0,\"up\":43,\"eid\":\"3013\",...}"}
+#        sent for every operation; ``data`` is a JSON string whose ``up``
+#        carries the Profile userOperation code.
+#   sid="event"      {"eid":"...","up":200,"aid":"...MOTION_DETECTION_..."}
+#        the user-facing copy; on this lock it also carries cat-eye records
+#        whose ``up`` lives outside the Profile enum.
 #
 # eventData is therefore the source of truth for userOperation and
 # doorAlarmState, and it is the only sid that reports interior unlocks.
@@ -69,7 +138,7 @@ _DOOR_ALARM_FIELD = "das"
 _USER_OPERATION_PROFILE_FIELD = "userOperation"
 _DOOR_ALARM_PROFILE_FIELD = "doorAlarmState"
 
-# lockStatus/status values declared by the KW02 Profile.
+# lockStatus/status values declared by the KW59 Profile (identical to KW02).
 _STATUS_DOOR_AJAR_LOCKED = 1  # 门未关异常上锁
 _STATUS_UNLOCKED = 2  # 已开锁
 _STATUS_LOCKED = 3  # 已上锁
@@ -81,71 +150,46 @@ _LOCKED_STATUSES = frozenset(
 )
 _UNLOCKED_STATUSES = frozenset({_STATUS_UNLOCKED, _STATUS_DOOR_CLOSED})
 
-# The door leaf itself is unambiguous on these states only: 门未关异常上锁 and
-# 已开锁 both mean the lock is not holding a shut door, while 已上锁 / 已关门 /
-# 已反锁 can only happen on a closed leaf.
+# The door leaf itself is unambiguous on these states only.
 _DOOR_OPEN_STATUSES = frozenset({_STATUS_DOOR_AJAR_LOCKED, _STATUS_UNLOCKED})
 _DOOR_CLOSED_STATUSES = frozenset(
     {_STATUS_LOCKED, _STATUS_DOOR_CLOSED, _STATUS_DEADBOLTED}
 )
 
-# Every lockStatus value the Profile declares.  AGS-X10 firmware also reports 7,
-# which the Profile does not describe and the vendor App has no label for:
-# observed only for the 2-7 s between 已上锁 and 已开锁 when the door is opened
-# with the interior knob or a key (the interior handle, 室内一握开锁, goes straight to
-# 已开锁), with doorEvent arriving at the very same instant.  Publishing it would
-# spell a bare "7" in 门锁状态 and, since it describes neither an open nor a shut
-# leaf, would also flip 门 and 门锁 to unknown for those seconds.  Undescribed
-# values are therefore held back and the last declared state stays on screen,
-# which is what the vendor App shows too.
+# Every lockStatus value the Profile declares.  Undescribed transitional
+# values (KW02's firmware reports a bare 7 between 已上锁 and 已开锁) are held
+# back and the last declared state stays on screen, which is what the vendor
+# App shows too.
 _DECLARED_STATUSES = _LOCKED_STATUSES | _UNLOCKED_STATUSES
 
-# lockAlarm/alarm values declared by the KW02 Profile.
+# lockAlarm/alarm values declared by the Profile.
 _ALARM_LOW_BATTERY = 2  # 低电量告警
-
-# The lock registers the lockAlarm service but never publishes a value for it:
-# every snapshot carries an empty body.  The dry-cell warning is reported on
-# batteryManager.lpmStatus instead, and doorAlarmState travels with the event
-# record, so those two are the real sources for the alarm entities.
-_BATTERY_LPM_FIELD = "lpmStatus"
-_LPM_ACTIVE = 1
 
 # The lock reports -1 for doorAlarmState while nothing is wrong.  That is a
 # real "no alarm" reading, so it is surfaced as such instead of being dropped
-# as an unknown state, which is indistinguishable from missing data in the UI.
+# as an unknown state.
 _NO_ALARM = "无告警"
 
 # How long a latched ``lockAlarm`` reading keeps counting as current.  The
-# cloud raises the alarm once and never sends the cleared value, so without a
-# window a door reported ajar days ago would still read as an active alarm.
-# The value is a reporting bound rather than a measured duration: a door left
-# ajar genuinely is a standing condition, and the vendor app keeps showing it,
-# so the window is set wide enough that only clearly abandoned readings expire.
+# cloud raises the alarm once and never sends the cleared value.
 _ALARM_PULSE_WINDOW = timedelta(hours=12)
 
 # doorBattery/level and catEyeBattery/level declare min = -1, which is not a
 # real percentage and is therefore projected as an unknown state.
 _BATTERY_UNKNOWN = -1
 
-# event.userOperation values that describe a deliberate unlock.
-# The Profile declares 24 = 门内开锁, but AGS-X10 firmware never sends 24: the
-# interior handle arrives as 35 and the interior knob as 37.  Verified from the
-# wire -- both arrive with lockStatus.status = 2 (已开锁), carry no userName and
-# no credential (uic = 0), and follow 25 (反锁) / 26 (解除反锁) when the door was
-# deadbolted from inside.  24 is kept as well in case a revision does send it.
-# 0-7 = 指纹 / 密码 / 人脸 / 门卡 / 手表手环 / 华为钱包 / 临时密码 / 物理钥匙,
-#       all triggered from the outdoor panel -> outdoor.
-# Every other value (credential management, deadbolt, arming, doorbell, ...) is
-# not an unlock and is projected as unknown; 38 is the auto re-lock that follows
-# every unlock after 8-30 s, so it must stay out of the unlock set.
-_OPERATION_INDOOR_HANDLE = 35  # 室内一握开锁
-_OPERATION_INDOOR_KNOB = 37  # 旋钮或钥匙开锁
-_OPERATION_RELOCK = 38  # 上锁
+# event.userOperation values that describe a deliberate unlock.  0-7 and 24
+# are declared by this product's Profile; 35/37 are interior-unlock codes the
+# KW02 firmware was observed to use (no AGS-E211 unlock captured yet -- see
+# the module docstring).  Everything else is not an unlock.
+_OPERATION_INDOOR_HANDLE = 35  # 室内一握开锁 (KW02 wire, unverified here)
+_OPERATION_INDOOR_KNOB = 37  # 旋钮或钥匙开锁 (KW02 wire, unverified here)
+_OPERATION_RELOCK = 38  # 上锁 (KW02 wire; AGS-E211 shows 43 instead, unlabelled)
 
-# The Profile's userOperation enum stops at 33, so the interior codes above have
-# no Profile label to resolve and would otherwise surface as bare numbers.  The
-# labels below are the ones the vendor App (华为智慧生活) shows for the very same
-# event, so both UIs name one operation the same way.
+# The Profile's userOperation enum stops at 33, so interior codes have no
+# Profile label.  The labels below are KW02 family observations, not AGS-E211
+# wire facts; an AGS-E211 unlock reporting an unknown code will surface as a
+# bare number until someone reads the vendor App's name for it.
 _FIRMWARE_OPERATION_LABELS = {
     _OPERATION_INDOOR_HANDLE: "室内一握开锁",
     _OPERATION_INDOOR_KNOB: "旋钮或钥匙开锁",
@@ -209,9 +253,8 @@ def _enum_label(field: Mapping[str, Any], value: Any) -> str | None:
 def _operation_label(field: Mapping[str, Any], value: Any) -> str | None:
     """Return the label for one userOperation value.
 
-    The Profile only describes the outdoor codes (0-33), so the interior codes
-    this firmware reports outside that range fall back to the labels read off
-    the wire.
+    The Profile only describes codes 0-33, so interior codes this firmware
+    may report fall back to the family labels read off the KW02 wire.
     """
 
     label = _enum_label(field, value)
@@ -223,34 +266,21 @@ def _operation_label(field: Mapping[str, Any], value: Any) -> str | None:
     return _FIRMWARE_OPERATION_LABELS.get(number)
 
 
-# The Profile declares lockStatus/status as method=RW, so this adapter is
-# entitled to register lock and unlock actions -- and a first version did.
-# AGS-X10 firmware accepts that write and then ignores it: the lock itself acks
-# the command with errcode=0 and immediately re-reports its unchanged status,
-# so the door never moves.  The vendor App (华为智慧生活) exposes no remote unlock
-# for this product either, and the securitySetting.enableRemoteUnlock = 1 it
-# reports is a static capability flag rather than a usable feature.  A control
-# that reports success without acting is worse than a missing one, so the
-# Profile's write permission is deliberately not turned into an action and the
-# lock entity stays a pure state reader.
-def _status_reader() -> Callable[[DeviceContext], Any]:
-    """Return a reader that keeps the last declared lockStatus value.
+# The Profile declares lockStatus/status as RW, so this adapter would be
+# entitled to register lock and unlock actions -- and the KW02 one did, once.
+# That firmware accepts the write and then ignores it: the lock acks the
+# command with errcode=0 and immediately re-reports its unchanged status, and
+# the vendor App exposes no remote unlock for the series either.  HA's lock
+# entity always renders 上锁/解锁 buttons, so the actions below exist solely
+# to refuse with a self-explanatory error: pressing them raises instead of
+# sending anything, which is both honest and safer than the generic
+# "adapter action is unavailable" (and far safer than a silent fake success).
+def _refusal_action(verb: str):
+    async def refuse(context: DeviceContext, data: Mapping[str, Any]) -> None:
+        del context, data
+        raise ValueError(f"该门锁不支持远程{verb}，请直接使用门锁面板操作")
 
-    lockStatus/status is the service every entity of this product reads, and the
-    firmware sometimes reports a value the Profile does not declare.  Returning
-    the last declared one keeps 门锁 / 门锁状态 / 门 describing the same state
-    instead of letting a transitional code blank all three out.
-    """
-
-    cache: dict[str, Any] = {"status": None}
-
-    def read(device: DeviceContext) -> Any:
-        status = _number(device.value(_LOCK_STATUS_SID, _LOCK_STATUS_FIELD))
-        if status in _DECLARED_STATUSES:
-            cache["status"] = status
-        return cache["status"]
-
-    return read
+    return refuse
 
 
 def _lock_spec(read_status: Callable[[DeviceContext], Any]) -> EntitySpec:
@@ -267,7 +297,32 @@ def _lock_spec(read_status: Callable[[DeviceContext], Any]) -> EntitySpec:
         key="lock",
         name="门锁",
         state=lock_state,
+        actions={
+            "lock": _refusal_action("上锁"),
+            "unlock": _refusal_action("开锁"),
+        },
     )
+
+
+def _status_reader() -> Callable[[DeviceContext], Any]:
+    """Return a reader that keeps the last declared lockStatus value.
+
+    lockStatus/status is the service every entity of this product reads, and
+    the firmware may report a value the Profile does not declare (KW02
+    observes a transitional 7).  Returning the last declared one keeps 门锁 /
+    门锁状态 / 门 describing the same state instead of letting a transitional
+    code blank all three out.
+    """
+
+    cache: dict[str, Any] = {"status": None}
+
+    def read(device: DeviceContext) -> Any:
+        status = _number(device.value(_LOCK_STATUS_SID, _LOCK_STATUS_FIELD))
+        if status in _DECLARED_STATUSES:
+            cache["status"] = status
+        return cache["status"]
+
+    return read
 
 
 def _lock_status_spec(
@@ -290,11 +345,31 @@ def _lock_status_spec(
     )
 
 
-def _battery_spec(field: str, key: str, name: str) -> EntitySpec:
+def _battery_level(device: DeviceContext, profile_field: str) -> int | float | None:
+    """Read one battery from the Profile service, then batteryManager.
+
+    Either source reporting nothing yields None (unknown) rather than a wrong
+    number; the Profile's min=-1 placeholder is not a real percentage.
+    """
+
+    value = _number(device.value(profile_field, _BATTERY_LEVEL_FIELD))
+    if value is not None and value > _BATTERY_UNKNOWN:
+        return value
+    return None
+
+
+def _battery_spec(
+    profile_field: str,
+    manager_field: str,
+    key: str,
+    name: str,
+) -> EntitySpec:
     def state(device: DeviceContext) -> Mapping[str, Any]:
-        value = _number(device.value(_BATTERY_SID, field))
-        if value is None or value <= _BATTERY_UNKNOWN:
-            return {"native_value": None}
+        value = _battery_level(device, profile_field)
+        if value is None:
+            value = _number(device.value(_BATTERY_SID, manager_field))
+            if value is not None and value <= _BATTERY_UNKNOWN:
+                value = None
         return {"native_value": value}
 
     return EntitySpec(
@@ -310,30 +385,29 @@ def _battery_spec(field: str, key: str, name: str) -> EntitySpec:
     )
 
 
+def _lock_alarm_is_stale(device: DeviceContext) -> bool:
+    """Report whether a ``lockAlarm`` reading is older than the pulse window.
+
+    ``lockAlarm`` latches: the lock raises it once and the cloud never
+    sends the cleared value.  An unparsable timestamp is *not* evidence of
+    staleness (the live MQTT ``ts`` carries fractional digits
+    ``parse_remote_timestamp`` rejects), so it keeps the latched state.
+
+    Both 门锁告警 and 低电量告警 gate their ``lockAlarm`` branch on this:
+    past the window a latched reading stops describing the present, so it
+    must not keep a replaced battery's low-power alarm on forever nor mask
+    a fresh ``lpmStatus`` reading.
+    """
+
+    when = device.service_updated_at(_LOCK_ALARM_SID)
+    if when is None:
+        return False
+    return datetime.now(timezone.utc) - when > _ALARM_PULSE_WINDOW
+
+
 def _alarm_spec(profile: Mapping[str, Any]) -> EntitySpec:
     lock_field = _field(profile, _LOCK_ALARM_SID, _LOCK_ALARM_FIELD) or {}
     door_field = _field(profile, _EVENT_SID, _DOOR_ALARM_PROFILE_FIELD) or {}
-
-    def _lock_alarm_is_stale(device: DeviceContext) -> bool:
-        """Report whether a ``lockAlarm`` reading is older than the pulse window.
-
-        ``lockAlarm`` latches: the lock raises it once and the cloud never sends
-        a cleared value, so a door that was reported ajar three days ago would
-        still read as an active alarm forever.
-
-        The age is only used when the device timestamp actually parsed.  A
-        failed parse is *not* evidence of staleness: the live MQTT ``ts``
-        carries nine fractional digits ("20260914T222103156Z"), which
-        ``parse_remote_timestamp`` rejects, so ``service_updated_at`` returns
-        None for every live push.  Treating that None as "old" would clear
-        genuinely current alarms -- the opposite of what this is for -- so an
-        unparsable timestamp keeps the previous latched behaviour.
-        """
-
-        when = device.service_updated_at(_LOCK_ALARM_SID)
-        if when is None:
-            return False
-        return datetime.now(timezone.utc) - when > _ALARM_PULSE_WINDOW
 
     def state(device: DeviceContext) -> Mapping[str, Any]:
         value = _number(device.value(_LOCK_ALARM_SID, _LOCK_ALARM_FIELD))
@@ -357,7 +431,10 @@ def _alarm_spec(profile: Mapping[str, Any]) -> EntitySpec:
 def _low_battery_spec() -> EntitySpec:
     def state(device: DeviceContext) -> Mapping[str, Any]:
         alarm = _number(device.value(_LOCK_ALARM_SID, _LOCK_ALARM_FIELD))
-        if alarm is not None and alarm >= 1:
+        # ``lockAlarm`` latches, so past the pulse window a latched reading
+        # must stop answering for the battery and yield to the live
+        # ``lpmStatus`` (same window the alarm sensor applies).
+        if alarm is not None and alarm >= 1 and not _lock_alarm_is_stale(device):
             return {"is_on": alarm == _ALARM_LOW_BATTERY}
         level = _number(device.value(_BATTERY_SID, _BATTERY_LPM_FIELD))
         if level is None:
@@ -423,11 +500,10 @@ def _unlock_direction(value: Any) -> str | None:
 def _event_record(device: DeviceContext) -> Mapping[str, Any]:
     """Return the flat event record, unpacking eventData's nested JSON.
 
-    ``event`` publishes the user-facing fields (``un`` = userName, ``cl`` =
-    clock) while ``eventData`` carries the Profile userOperation and
-    doorAlarmState codes, so eventData's fields win when both describe the same
-    event.  Its copy is normally a JSON string inside ``data``, but a revision
-    may deliver it already parsed, so both shapes are accepted.
+    ``event`` publishes the user-facing fields while ``eventData`` carries the
+    Profile userOperation and doorAlarmState codes, so eventData's fields win
+    when both describe the same event.  Its copy is normally a JSON string
+    inside ``data``, but a revision may deliver it already parsed.
     """
 
     record: dict[str, Any] = dict(device.service_state(_EVENT_SID))
@@ -444,7 +520,7 @@ def _event_record(device: DeviceContext) -> Mapping[str, Any]:
     if isinstance(parsed, Mapping):
         record.update(parsed)
     _LOGGER.debug(
-        "KW02 event record: event=%s eventData=%s merged=%s",
+        "KW59 event record: event=%s eventData=%s merged=%s",
         device.service_state(_EVENT_SID),
         raw,
         record,
@@ -455,20 +531,15 @@ def _event_record(device: DeviceContext) -> Mapping[str, Any]:
 def _event_kind(record: Mapping[str, Any]) -> str | None:
     """Classify one lock event record as unlock / lock / alarm / motion.
 
-    The classification mirrors the adapter's own state entities so an event and
-    its matching sensor can never disagree about what happened.
+    The classification mirrors the adapter's own state entities so an event
+    and its matching sensor can never disagree about what happened.
 
-    Two wire quirks drive the order of the checks:
-
-    * ``event`` is emitted only for credential unlocks and its ``up`` lives in a
-      different code space (201 for a credential unlock, never a Profile value),
-      so an ``up`` the Profile cannot place is not "no event" when the record
-      carries a user name -- it is an unlock.  ``eventData`` remains the
-      authority for operations it does describe.
-    * the observed ``event`` payload for a loitering detection also carried
-      ``up: 201`` while its ``aid`` embedded ``MOTION_DETECTION``, so the aid
-      token is checked first and otherwise such a record would be reported as an
-      unlock.
+    Wire quirks driving the order of the checks (both observed on the
+    AGS-E211): the cat-eye motion copy carries ``up: 200`` with the
+    ``MOTION_DETECTION`` token inside ``aid``, and ``eventData`` reports
+    door-close-class operations such as ``up: 43`` with no user name -- those
+    must not surface as unlocks, so the aid token is checked first and an
+    unknown operation without a user name produces nothing.
     """
 
     identifier = record.get("aid")
@@ -491,12 +562,7 @@ def _event_kind(record: Mapping[str, Any]) -> str | None:
 
 
 def _event_identifier(record: Mapping[str, Any]) -> str | None:
-    """Return the identifier the lock assigns to one occurrence.
-
-    ``event``/``eventData`` carry ``eid``, which increments per event, so it is
-    what actually distinguishes two consecutive unlocks.  The nested
-    ``aid``/``id`` fields are a fallback for revisions that omit ``eid``.
-    """
+    """Return the identifier the lock assigns to one occurrence."""
 
     for key in ("eid", "aid", "id"):
         value = record.get(key)
@@ -514,30 +580,18 @@ def _lock_event_decoder(
     """Turn one lock event push into a Home Assistant event.
 
     The lock pushes every operation once and never sends the cleared value, so
-    the state entities (最近开门方式 / 开门方向 / 最近告警) only describe *what
-    happened last*.  Two consecutive unlocks by the same person through the same
-    method produce no state change at all, which means an automation built on
-    those entities runs once and then stops.
-
-    This decoder supplies the missing half: each accepted push fires an event.
+    the state entities only describe *what happened last*.  This decoder
+    supplies the missing half: each accepted push fires an event.
 
     ``event`` carries the user-facing fields (``un`` = user name, ``cl`` =
-    clock) while ``eventData`` carries the operation and alarm codes, so the two
-    are merged exactly the way ``_event_record`` does for the state readers.
+    clock) while ``eventData`` carries the operation and alarm codes.  A push
+    is decoded on its own fields; the other service only fills in what this
+    push lacks, and never its identity (``eid``/``aid``/``et``).
     """
 
     if sid not in (_EVENT_SID, _EVENT_DATA_SID):
         return []
 
-    # Decode THIS push, not the standing record.  ``_event_record`` merges both
-    # services because the state readers want the latest known picture, but an
-    # event must not inherit the previous occurrence: the lock reports a
-    # "door closed" record on ``eventData`` right after an unlock, so merging the
-    # cached half would relabel that unlock as a lock and reuse its id.
-    #
-    # The other service is therefore consulted only for fields this push does
-    # not carry: ``un``/``cl`` arrive on ``event`` while ``up``/``das`` arrive on
-    # ``eventData``, and a push may legitimately carry only one half.
     def _parsed_payload(value: Any) -> Mapping[str, Any]:
         if isinstance(value, Mapping):
             return value
@@ -555,13 +609,15 @@ def _lock_event_decoder(
         current.pop(_EVENT_DATA_PAYLOAD_FIELD, None)
         current.update(_parsed_payload(data.get(_EVENT_DATA_PAYLOAD_FIELD)))
     elif sid == _EVENT_SID:
-        current.update(device.service_state(_EVENT_DATA_SID))
-        current.pop(_EVENT_DATA_PAYLOAD_FIELD, None)
+        # The other service only fills in what this push lacks -- its flat
+        # fields included, not just the parsed ``data`` payload.
+        for key, value in device.service_state(_EVENT_DATA_SID).items():
+            if key == _EVENT_DATA_PAYLOAD_FIELD:
+                continue
+            current.setdefault(key, value)
         other = _parsed_payload(
             device.value(_EVENT_DATA_SID, _EVENT_DATA_PAYLOAD_FIELD)
         )
-        # Only fill in what this push lacks, and never take the *identity* of an
-        # event from the other service.
         for key, value in other.items():
             if key in ("eid", "aid", "id", "et"):
                 continue
@@ -571,8 +627,8 @@ def _lock_event_decoder(
 
     kind = _event_kind(merged)
     if kind is None:
-        # Credential management, arming, doorbell and similar records are not
-        # user-visible door events, so they deliberately produce nothing.
+        # Credential management, door-close bookkeeping (up=43 on this lock),
+        # arming, doorbell and similar records produce nothing.
         return []
 
     operation = _number(merged.get(_USER_OPERATION_FIELD))
@@ -616,10 +672,10 @@ def _lock_event_spec() -> EntitySpec:
 def _unlock_reader() -> Callable[[DeviceContext], Any]:
     """Return a reader that keeps the latest unlock seen by one entity.
 
-    The lock reports every event on ``eventData``, so reading the field directly
-    would let a following record such as "door closed" overwrite the unlock
-    code.  The most recent value the Profile recognises as an unlock is cached
-    instead, and later non-unlock records leave it untouched.
+    The lock reports every operation on ``eventData``, so reading the field
+    directly would let a following record such as the door-close copy (up=43)
+    overwrite the unlock code.  The most recent value recognised as an unlock
+    is cached instead.
     """
 
     cache: dict[str, Any] = {"operation": None}
@@ -675,8 +731,6 @@ def _door_alarm_spec(profile: Mapping[str, Any]) -> EntitySpec:
     field = _field(profile, _EVENT_SID, _DOOR_ALARM_PROFILE_FIELD) or {}
 
     def state(device: DeviceContext) -> Mapping[str, Any]:
-        # The Profile enum starts at 1; the lock reports -1 while nothing is
-        # wrong, which is surfaced as an explicit "no alarm" reading.
         value = _number(_event_record(device).get(_DOOR_ALARM_FIELD))
         if value is None:
             return {"native_value": None}
@@ -692,10 +746,10 @@ def _door_alarm_spec(profile: Mapping[str, Any]) -> EntitySpec:
     )
 
 
-class ProductKW02Adapter:
-    """HUAWEI SmartLock Pro (AGS-X10) entity and command choices."""
+class ProductKW59Adapter:
+    """HUAWEI SmartLock E211 (AGS-E211) entity and command choices."""
 
-    prod_id = "KW02"
+    prod_id = "KW59"
 
     def entities(self, context: DeviceContext) -> tuple[EntitySpec, ...]:
         profile = context.profile
@@ -708,12 +762,24 @@ class ProductKW02Adapter:
             _lock_status_spec(profile, read_status),
             _door_spec(read_status),
         ]
-        if context.has_service(_BATTERY_SID):
+        if context.has_service(_DOOR_BATTERY_SID) or context.has_service(
+            _BATTERY_SID
+        ):
             entities.append(
-                _battery_spec(_LITHIUM_BATTERY_FIELD, "lithium_battery", "锂电池电量")
+                _battery_spec(
+                    _DOOR_BATTERY_SID,
+                    _LITHIUM_BATTERY_FIELD,
+                    "lithium_battery",
+                    "锂电池电量",
+                )
             )
             entities.append(
-                _battery_spec(_DRY_BATTERY_FIELD, "dry_battery", "干电池电量")
+                _battery_spec(
+                    _CAT_EYE_BATTERY_SID,
+                    _DRY_BATTERY_FIELD,
+                    "dry_battery",
+                    "干电池电量",
+                )
             )
         if context.has_service(_LOCK_ALARM_SID):
             entities.append(_alarm_spec(profile))
@@ -725,9 +791,9 @@ class ProductKW02Adapter:
             entities.append(_open_direction_spec(read_unlock))
             entities.append(_last_open_method_spec(profile, read_unlock))
             entities.append(_door_alarm_spec(profile))
-            # The state entities above describe the latest operation; this event
-            # entity fires on every operation, so an automation runs on each
-            # unlock instead of only on the first one.
+            # The state entities above describe the latest operation; this
+            # event entity fires on every operation, so an automation runs on
+            # each unlock instead of only on the first one.
             entities.append(_lock_event_spec())
         entities.extend(_firmware_specs(context))
         entities.extend(_roster_specs(context))
@@ -738,27 +804,29 @@ class ProductKW02Adapter:
 # ---------------------------------------------------------------------------
 # Read-only reporting entities.
 #
-# AGS-X10 firmware reports far more than the public Profile declares: the lock
-# pushes 42 services while the Profile documents 21.  The entities below are
-# read-only projections of services the lock was observed to report on a real
-# device; nothing here writes to the lock and no command is offered, so no
-# unverified write can reach the hardware.
+# The AGS-E211 pushes 34 services while the Profile documents 20.  Everything
+# below is a read-only projection of services observed on the real lock; no
+# command is offered anywhere in this adapter.
 #
 # Wire details confirmed against the lock (deviating from the Profile):
-#   update           currentVersion is a firmware string ("AGS-X10 5.0.0.1(SP65C00)").
-#                    The Profile's update.action is deliberately not exposed.
-#   users            userList carries every enrolled member (un = name).
-#   keyOperate       keyName names the credential used last ("人脸 01").
-#   doorEvent        the per-event feed; its userName is the same person the
-#                    event/eventData pair reports.
-#   lastActionTime   time is the last time the lock was operated.
+#   update         currentVersion is a firmware string
+#                  ("AGS-E211 5.0.0.1(SP43C00)").  update.action is not mapped.
+#   users          userList carries every enrolled member (un = name).
+#   ciphers / keyCards / watchs / walletKeys
+#                  further credential rosters this model pushes.
+#   doorEvent      the per-event feed; only its userName is read (the event
+#                  code space is undocumented).
+#   lastActionTime time is the last time the lock was operated.
 # ---------------------------------------------------------------------------
 
 _UPDATE_SID = "update"
 _USERS_SID = "users"
 _FACES_SID = "faces"
 _FINGERS_SID = "fingers"
-_KEY_OPERATE_SID = "keyOperate"
+_CIPHERS_SID = "ciphers"
+_KEY_CARDS_SID = "keyCards"
+_WATCHS_SID = "watchs"
+_WALLET_KEYS_SID = "walletKeys"
 _DOOR_EVENT_SID = "doorEvent"
 _LAST_ACTION_SID = "lastActionTime"
 
@@ -766,9 +834,8 @@ _LAST_ACTION_SID = "lastActionTime"
 def _firmware_specs(context: DeviceContext) -> list[EntitySpec]:
     """Firmware version of the lock body.
 
-    Read-only on purpose: the Profile's ``update.action`` would let HA start an
-    OTA, which has not been validated on this hardware, so only the reported
-    version is projected.
+    Read-only on purpose: the Profile's ``update.action`` would let HA start
+    an OTA, which has not been validated on this hardware.
     """
 
     if not context.has_service(_UPDATE_SID):
@@ -790,7 +857,7 @@ def _firmware_specs(context: DeviceContext) -> list[EntitySpec]:
 
 
 def _roster_specs(context: DeviceContext) -> list[EntitySpec]:
-    """Enrolled-credential counts, e.g. how many faces or fingerprints exist."""
+    """Enrolled-credential counts, e.g. how many fingerprints exist."""
 
     specs: list[EntitySpec] = []
 
@@ -837,22 +904,30 @@ def _roster_specs(context: DeviceContext) -> list[EntitySpec]:
         specs.append(make_count(_FACES_SID, "face", "face_count", "人脸数"))
     if context.has_service(_FINGERS_SID):
         specs.append(make_count(_FINGERS_SID, "finger", "finger_count", "指纹数"))
+    if context.has_service(_CIPHERS_SID):
+        specs.append(make_count(_CIPHERS_SID, "cipher", "cipher_count", "密码数"))
+    if context.has_service(_KEY_CARDS_SID):
+        specs.append(make_count(_KEY_CARDS_SID, "keyCard", "keycard_count", "门卡数"))
+    if context.has_service(_WATCHS_SID):
+        specs.append(
+            make_count(_WATCHS_SID, "watch", "watch_count", "手表手环数")
+        )
+    if context.has_service(_WALLET_KEYS_SID):
+        specs.append(
+            make_count(_WALLET_KEYS_SID, "walletKey", "wallet_key_count", "钱包钥匙数")
+        )
     return specs
 
 
 def _reader_based_specs(context: DeviceContext) -> list[EntitySpec]:
     """Last-operated metadata reported as plain text.
 
-    These services are event-driven: the lock pushes keyOperate, doorEvent and
-    lastActionTime only when something happens, so none of them appears in the
-    discovery snapshot and ``has_service`` is false for them at setup time.
-    They are therefore always registered and simply report unknown until the
-    first event arrives.
+    These services are event-driven: the lock pushes doorEvent and
+    lastActionTime only when something happens, so none of them appears in
+    the discovery snapshot and ``has_service`` is false for them at setup
+    time.  They are therefore always registered and simply report unknown
+    until the first event arrives.
     """
-
-    def key_name(device: DeviceContext) -> Mapping[str, Any]:
-        value = device.value(_KEY_OPERATE_SID, "keyName")
-        return {"native_value": value if isinstance(value, str) and value else None}
 
     def door_user(device: DeviceContext) -> Mapping[str, Any]:
         value = device.value(_DOOR_EVENT_SID, "userName")
@@ -862,24 +937,13 @@ def _reader_based_specs(context: DeviceContext) -> list[EntitySpec]:
         value = device.value(_LAST_ACTION_SID, "time")
         if not isinstance(value, str) or not value:
             return {"native_value": None}
-        # The lock reports SmartHome stamps ("20260912T094645Z"), not ISO 8601.
-        # Parsing them lets the entity carry device_class=timestamp so Home
-        # Assistant renders a relative time ("3 hours ago") instead of the raw
-        # compact string.
-        #
-        # An unparsable stamp reports None rather than the raw text: the device
-        # class is fixed at construction, and HA rejects a non-timestamp value
-        # under it, so returning the string would surface "unknown" anyway --
-        # and a value HA cannot read is worse than an honest "no reading".
+        # The lock reports SmartHome stamps ("20260915T232350Z"), not ISO
+        # 8601.  Parsing them lets the entity carry device_class=timestamp so
+        # Home Assistant renders a relative time.  An unparsable stamp
+        # reports None rather than a string HA would reject under this class.
         return {"native_value": parse_remote_timestamp(value)}
 
     return [
-        EntitySpec(
-            platform="sensor",
-            key="last_key",
-            name="最近使用钥匙",
-            state=key_name,
-        ),
         EntitySpec(
             platform="sensor",
             key="door_event_user",
@@ -891,14 +955,9 @@ def _reader_based_specs(context: DeviceContext) -> list[EntitySpec]:
             key="last_action_time",
             name="最近操作时间",
             state=last_action,
-            # The state reader parses the SmartHome stamp
-            # ("20260912T094645Z") into a datetime, so the entity can carry
-            # device_class=timestamp and Home Assistant renders it as a
-            # relative time.  A stamp that does not parse reads as None rather
-            # than as a string HA would reject under this class.
             metadata={"entity_category": "diagnostic", "device_class": "timestamp"},
         ),
     ]
 
 
-ADAPTER = ProductKW02Adapter()
+ADAPTER = ProductKW59Adapter()
