@@ -46,7 +46,7 @@
 | `X0A3` | HUAWEI Sound Joy | 华为 | HUAWEI Sound Joy |
 | `ZG0E` | 智能面板 | 华为 | 场景面板 |
 | `ZG1Y` | AI 超感传感器 | 华为 | 人体检测传感器 |
-
+| `KW03` | 华为智能门锁（AGS-Q10） | 华为 | 智能门锁 |
 ## 维护规则
 
 新增单品时，在 `custom_components/huawei_smarthome/device_adapters/` 增加对应的 `prod_<prodId>.py`，并同步更新本表。重复 `prodId` 不应新增第二个适配器文件。
