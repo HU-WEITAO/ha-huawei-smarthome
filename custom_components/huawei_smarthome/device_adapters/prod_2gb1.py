@@ -10,12 +10,11 @@ js/index.js):
 
 - The page is a read-only dashboard.  The display config declares
   temperature_current min=-100 max=400 unit ℃ and humidity_current
-  min=0 max=1000 unit %, with no divisor applied anywhere in the page
-  engine.  The raw characteristic values are therefore TENTHS: the
-  sibling 2QBO air monitor reports temperature.currentFloat -20..60 ℃
-  and humidity 0..100 % directly, so 2GB1's -100..400 and 0..1000 map
-  to -10.0..40.0 ℃ and 0.0..100.0 % via ÷10 — the only physically
-  consistent reading for the -10..40 ℃ / 0..100 % sensor hardware.
+  min=0 max=1000 unit %.  The declared ranges look like tenths, but
+  LIVE DEVICE READINGS disprove that: the sensor reports
+  humidity.current=33 → 33 %RH and temperature.current=38 → 38 ℃
+  (the /10 reading would show an impossible 3.3 % / 3.8 ℃).
+  Values are therefore used as-is, unscaled.
 - No dispatch sites at all: the page only forwards status-bar clicks.
   All services are read-only in practice (humidity.target is never
   referenced by the page and has no documented write semantics → not
@@ -106,12 +105,6 @@ def _enum_text(context: DeviceContext, sid: str, name: str) -> str | None:
     return None
 
 
-def _scale_tenths(context: DeviceContext, sid: str, name: str) -> float | None:
-    """Raw tenth-unit reading → physical value."""
-    raw = _number(context.value(sid, name))
-    return None if raw is None else raw / 10.0
-
-
 def _net_info_entities(context: DeviceContext, profile: Any) -> list[EntitySpec]:
     if not context.has_service("netInfo"):
         return []
@@ -176,7 +169,7 @@ class Product2GB1Adapter:
                     key="temperature",
                     name="温度",
                     state=lambda ctx: {
-                        "native_value": _scale_tenths(ctx, "temperature", "current")
+                        "native_value": _number(ctx.value("temperature", "current"))
                     },
                     metadata={"device_class": "temperature", "state_class": "measurement", "unit": "℃"},
                 )
@@ -191,7 +184,7 @@ class Product2GB1Adapter:
                     key="humidity",
                     name="湿度",
                     state=lambda ctx: {
-                        "native_value": _scale_tenths(ctx, "humidity", "current")
+                        "native_value": _number(ctx.value("humidity", "current"))
                     },
                     metadata={"device_class": "humidity", "state_class": "measurement", "unit": "%"},
                 )
