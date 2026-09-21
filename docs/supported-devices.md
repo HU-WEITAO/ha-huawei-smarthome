@@ -99,7 +99,30 @@
 | `2C60` | 鸿蒙智选 海雀智能摄像头 Pro | 深圳市海雀科技有限公司 | 网络摄像头 |
 | `2265` | 凯迪仕智能门锁HK600 | 凯迪仕 | 智能门锁 |
 | `KW03` | 华为智能门锁（AGS-Q10） | 华为 | 智能门锁 |
+| `ZG0X` | Spotlight | 华为 | 智能照明 |
+| `ZG0Y` | CeilingLamp | 华为 | 智能照明 |
+| `ZG0S` | Lamp | 华为 | 智能照明 |
+| `ZG0R` | Pendant Lamp | 华为 | 智能照明 |
+| `28RD` | TDQ007 | 广州万烨 | 智能照明 |
+| `ZG1I` | BER-LD12 | 华为 | 智能照明 |
+| `ZG0O` | BER-LD01 | 华为 | 智能照明 |
+| `20CL` | BL2210R | — | 智能照明 |
+| `2AOS` | XD819*519P-LED108 | 佛山照明 | 智能照明 |
+| `2JDD` | OP-DY220/45-58CV-CB-T | 欧普照明 | 智能照明 |
+| `155F` | FSL-XDD-TW | 佛山照明 | 智能照明 |
+| `27WB` | BCHP960TLR-1.2/14 | — | 窗帘 |
+| `2N5R` | BFMH-JDHWG | 博孚 | 梦幻帘 |
+| `140B` | CM_190901_V01 | 巴百信息 | 窗帘 |
+| `2OPO` | MIR-TE100-XS | 麦乐克 | 温湿度传感器 |
+| `ZG0F` | BER-SE00 | 华为 | AI 传感器 |
+| `2GIP` | JSQ31-VJSH | A.O.史密斯 | 燃气热水器 |
+| `2N91` | G6-300AS | — | 智能马桶 |
+| `29UZ` | JD172 | 九牧 | 浴霸 |
+| `A36L` | X2 | 科沃斯 | 扫地机器人 |
+| `29XC` | OJ-501E | 浙江欧伦电气有限公司 | 除湿机 |
 
 ## 维护规则
 
 新增单品时，在 `custom_components/huawei_smarthome/device_adapters/` 增加对应的 `prod_<prodId>.py`，并同步更新本表。重复 `prodId` 不应新增第二个适配器文件。
+
+本次新增产品的功能范围与验证说明见 [适配说明](adapters/verified-products.md)。
