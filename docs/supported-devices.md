@@ -86,6 +86,7 @@
 | `V0E9` | 华为Vision智慧屏 4 Pro | 华为 | 智慧屏 |
 | `V0FB` | 华为Vision智慧屏 5 | 华为 | 智慧屏 |
 | `V0G8` | 华为Vision智慧屏 6 | 华为 | 智慧屏 |
+| `W001` | 荣耀智慧屏系列 | 荣耀 | 智慧屏 |
 | `X005` | 华为 AI 音箱 2（电池版） | 华为 | 华为 AI 音箱 2（电池版） |
 | `X0A2` | 华为 AI 音箱 2e | 华为 | 华为 AI 音箱 2e |
 | `X0A3` | HUAWEI Sound Joy | 华为 | HUAWEI Sound Joy |
