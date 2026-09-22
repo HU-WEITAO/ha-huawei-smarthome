@@ -32,6 +32,10 @@ class EntitySpec:
     event_decoder: EventDecoder | None = None
     availability: AvailabilityReader | None = None
 
+    def __post_init__(self):
+        if self.metadata is None:
+            self.metadata = {}
+
 
 class HuaweiProductAdapter(Protocol):
     """Interface implemented by one ``prod_<prodId>.py`` file."""
