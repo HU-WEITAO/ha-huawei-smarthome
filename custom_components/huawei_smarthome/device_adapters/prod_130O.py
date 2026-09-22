@@ -2,7 +2,7 @@
 
 设备类型: 热水器
 本适配器暴露:
-   1. switch 电源开关(switch.on)
+   1. water_heater 热水器(switch.on / temperature.target / mode.mode)
    2. binary_sensor 燃烧状态(burningStatus.on)
    3. binary_sensor 循环状态(loopStatus.on)
    4. binary_sensor 燃气安全状态(gasSafeStatus.status)
@@ -10,10 +10,7 @@
    6. select 零冷水模式(noColdWaterMode.mode 1=夏季,2=冬季)
    7. switch 零冷水开关(noColdWater.on)
    8. switch 增压模式(boost.on)
-   9. number 目标温度(temperature.target)
-   10. sensor 进水温度(temperature.inlet)
-   11. select 运行模式(mode.mode 0=无模式,1=厨房模式,2=夏季淋浴,3=冬季泡澡)
-   12. switch 运行模式开关(mode.on)
+   9. sensor 进水温度(temperature.inlet)
 
    13. binary_sensor 故障(faultCode.status)
    14. sensor 故障码(faultCode.code 0~15)
@@ -39,10 +36,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Callable
 from typing import Any
-
-from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
-from homeassistant.components.binary_sensor import BinarySensorDeviceClass
-from homeassistant.const import EntityCategory
 
 from .api import EntitySpec
 from .context import DeviceContext
@@ -152,18 +145,70 @@ def _sensorEntitySpec(name: str, key: str, service: str, characteristic: str, me
         availability=availability,
     )
 
-def _numberEntitySpec(name: str, key: str, service: str, characteristic: str, metadata: Mapping[str, Any] = None) -> EntitySpec:
+
+def _water_heater_spec(context: DeviceContext) -> EntitySpec:
+    """Expose the main water-heater controls as one HA water_heater entity."""
+
+    actions = {
+        "turn_on": lambda device, _data: device.async_send_service(
+            "switch", {"on": 1}
+        ),
+        "turn_off": lambda device, _data: device.async_send_service(
+            "switch", {"on": 0}
+        ),
+    }
+    if context.has_service("temperature"):
+        actions["set_temperature"] = lambda device, data: device.async_send_service(
+            "temperature", {"target": _number(data.get("temperature"))}
+        )
+    if context.has_service("mode"):
+
+        async def set_operation_mode(
+            device: DeviceContext,
+            data: Mapping[str, Any],
+        ) -> None:
+            option = str(data.get("operation_mode"))
+            if option not in _MODE_VALUES:
+                raise ValueError(f"unknown mode: {option}")
+            value = _MODE_VALUES[option]
+            await device.async_send_service(
+                "mode",
+                {"on": 0 if value == 0 else 1, "mode": value},
+            )
+
+        actions["set_operation_mode"] = set_operation_mode
+
+    def state(device: DeviceContext) -> Mapping[str, Any]:
+        mode = _number(device.value("mode", "mode"))
+        operation = next(
+            (
+                label
+                for label, value in _MODE_VALUES.items()
+                if mode == value
+            ),
+            None,
+        )
+        if _bool(device.value("mode", "on")) is False:
+            operation = "无模式"
+        return {
+            "target_temperature": _number(
+                device.value("temperature", "target")
+            ),
+            "current_operation": operation,
+        }
+
     return EntitySpec(
-        platform="number",
-        key=key,
-        name=name,
-        state=lambda device: {
-            "native_value": _number(device.value(service, characteristic))
+        platform="water_heater",
+        key="water_heater",
+        name="热水器",
+        state=state,
+        metadata={
+            "min_temp": 35,
+            "max_temp": 70,
+            "target_temp_step": 1,
+            "operation_modes": _MODE_OPTIONS,
         },
-        metadata=metadata,
-        actions={
-            "set_value": lambda d, data: d.async_send_service(service, {characteristic: _number(data.get("value"))})
-        },
+        actions=actions,
     )
 
 class Product130OAdapter:
@@ -175,15 +220,13 @@ class Product130OAdapter:
         if context.profile is None or not context.has_service("switch"):
             return ()
 
-        entities: list[EntitySpec] = [
-            _switchEntitySpec("电源", "power", "switch", "on")
-        ]
+        entities: list[EntitySpec] = [_water_heater_spec(context)]
 
         if context.has_service("burningStatus"):
             entities.append(
                 _binarySensorEntitySpec(
                     "燃烧状态", "burning_status", "burningStatus", "on",
-                    metadata={"device_class": BinarySensorDeviceClass.RUNNING}
+                    metadata={"device_class": "running"}
                 )
             )
 
@@ -191,7 +234,7 @@ class Product130OAdapter:
             entities.append(
                 _binarySensorEntitySpec(
                     "循环状态", "loop_status", "loopStatus", "on",
-                    metadata={"device_class": BinarySensorDeviceClass.RUNNING}
+                    metadata={"device_class": "running"}
                 )
             )
 
@@ -199,7 +242,7 @@ class Product130OAdapter:
             entities.append(
                 _binarySensorEntitySpec(
                     "燃气安全状态", "gas_safe_status", "gasSafeStatus", "status",
-                    metadata={"device_class": BinarySensorDeviceClass.PROBLEM}
+                    metadata={"device_class": "problem"}
                 )
             )
 
@@ -207,7 +250,7 @@ class Product130OAdapter:
             entities.append(
                 _binarySensorEntitySpec(
                     "整机安全状态", "machine_safe_status", "machineSafeStatus", "status",
-                    metadata={"device_class": BinarySensorDeviceClass.PROBLEM}
+                    metadata={"device_class": "problem"}
                 )
             )
 
@@ -258,48 +301,9 @@ class Product130OAdapter:
 
         if context.has_service("temperature"):
             entities.append(
-                _numberEntitySpec(
-                    "目标温度", "target_temperature", "temperature", "target",
-                    metadata={"min": 35, "max": 75, "step": 1, "unit": "°C"}
-                )
-            )
-            entities.append(
                 _numberSensorEntitySpec(
                     "进水温度", "inlet_temperature", "temperature", "inlet",
-                    metadata={"unit": "°C", "device_class": SensorDeviceClass.TEMPERATURE, "state_class": SensorStateClass.MEASUREMENT}
-                )
-            )
-
-        if context.has_service("mode"):
-            async def set_mode(device: DeviceContext, data: Mapping[str, Any]) -> None:
-                option = str(data.get("option"))
-                if option not in _MODE_VALUES:
-                    raise ValueError(f"unknown mode: {option}")
-                value = _MODE_VALUES[option]
-                if value == 0:
-                    # 0=无模式,1=厨房模式,2=夏季淋浴,3=冬季泡澡
-                    # 0=关闭,1=开启
-                    await device.async_send_service("mode", {"on": 0, "mode": value})
-                else:
-                    await device.async_send_service("mode", {"on": 1, "mode": value})
-
-            entities.append(
-                EntitySpec(
-                    platform="select",
-                    key="mode",
-                    name="运行模式",
-                    state=lambda device: {
-                        "current_option": next(
-                            (
-                                label
-                                for label, raw in _MODE_VALUES.items()
-                                if _number(device.value("mode", "mode")) == raw
-                            ),
-                            None,
-                        )
-                    },
-                    metadata={"options": _MODE_OPTIONS},
-                    actions={"select_option": set_mode},
+                    metadata={"unit": "°C", "device_class": "temperature", "state_class": "measurement"}
                 )
             )
 
@@ -307,14 +311,14 @@ class Product130OAdapter:
             entities.append(
                 _numberSensorEntitySpec(
                     "当前水流量", "current_water_flow", "useInformation", "waterFlow",
-                    metadata={"unit": "L/min", "device_class": SensorDeviceClass.VOLUME_FLOW_RATE, "state_class": SensorStateClass.MEASUREMENT},
+                    metadata={"unit": "L/min", "device_class": "volume_flow_rate", "state_class": "measurement"},
                     availability=lambda device: device.value("useInformation", "waterFlow") is not None
                 )
             )
             entities.append(
                 _numberSensorEntitySpec(
                     "生产热水总量", "total_hot_water", "useInformation", "hotWater",
-                    metadata={"unit": "m³", "device_class": SensorDeviceClass.WATER, "state_class": SensorStateClass.TOTAL_INCREASING},
+                    metadata={"unit": "m³", "device_class": "water", "state_class": "total_increasing"},
                     availability=lambda device: device.value("useInformation", "hotWater") is not None,
                     scale=0.1
                 )
@@ -322,14 +326,14 @@ class Product130OAdapter:
             entities.append(
                 _numberSensorEntitySpec(
                     "累计工作时长", "total_burning_time", "useInformation", "burningTime",
-                    metadata={"unit": "h", "device_class": SensorDeviceClass.DURATION, "state_class": SensorStateClass.TOTAL_INCREASING},
+                    metadata={"unit": "h", "device_class": "duration", "state_class": "total_increasing"},
                     availability=lambda device: device.value("useInformation", "burningTime") is not None
                 )
             )
             entities.append(
                 _numberSensorEntitySpec(
                     "累计燃气消耗", "total_natural_gas", "useInformation", "naturalGas",
-                    metadata={"unit": "m³", "device_class": SensorDeviceClass.GAS, "state_class": SensorStateClass.TOTAL_INCREASING},
+                    metadata={"unit": "m³", "device_class": "gas", "state_class": "total_increasing"},
                     availability=lambda device: device.value("useInformation", "naturalGas") is not None,
                     scale=0.1
                 )
@@ -339,14 +343,14 @@ class Product130OAdapter:
             entities.append(
                 _binarySensorEntitySpec(
                     "故障状态", "fault_code_status", "faultCode", "status",
-                    metadata={"entity_category": EntityCategory.DIAGNOSTIC, "device_class": BinarySensorDeviceClass.PROBLEM}
+                    metadata={"entity_category": "diagnostic", "device_class": "problem"}
                 )
             )
             entities.append(
                 _sensorEntitySpec(
                     "故障码", "fault_code", "faultCode", "code",
                     value_map=_ERROR_VALUES,
-                    metadata={"entity_category": EntityCategory.DIAGNOSTIC}
+                    metadata={"entity_category": "diagnostic"}
                 )
             )
 
