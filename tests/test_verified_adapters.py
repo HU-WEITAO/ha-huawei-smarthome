@@ -1,12 +1,34 @@
 """Offline regression tests: synthetic states, selected public protocol fields."""
 
+import ast
 import json
 import unittest
+from pathlib import Path
 
 from adapter_test_support import PROFILES, Context, module
 
 
 class Tests(unittest.IsolatedAsyncioTestCase):
+    def test_products_have_no_shared_adapter_implementation_dependency(self):
+        directory = (
+            Path(__file__).resolve().parents[1]
+            / "custom_components/huawei_smarthome/device_adapters"
+        )
+        for pid in PROFILES:
+            tree = ast.parse((directory / f"prod_{pid}.py").read_text())
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.level:
+                    self.assertEqual(node.module, "api", pid)
+        for stem in (
+            "profile_controls",
+            "profile_lights",
+            "profile_curtains",
+            "radar_map",
+            "radar_options",
+            "radar_tuning",
+        ):
+            self.assertFalse((directory / (stem + ".py")).exists())
+
     def test_product_scope_and_passive_readers(self):
         for pid in PROFILES:
             with self.subTest(pid=pid):
@@ -24,7 +46,19 @@ class Tests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(adapter.entities(c))
 
     async def test_all_lights_power_and_report(self):
-        for pid in module("profile_lights").LIGHTS:
+        for pid in (
+            "ZG0X",
+            "ZG0Y",
+            "ZG0S",
+            "ZG0R",
+            "28RD",
+            "ZG1I",
+            "ZG0O",
+            "20CL",
+            "2AOS",
+            "2JDD",
+            "155F",
+        ):
             c = Context(pid, {"switch": {"on": 0}})
             s = c.specs()[0]
             await s.actions["turn_on"](c, {})
@@ -260,7 +294,7 @@ class Tests(unittest.IsolatedAsyncioTestCase):
                 s["characteristics"][0]["method"] = "R"
         for sid, key, v in [("cct", "colorTemperature", 3500), ("missing", "on", 1)]:
             with self.assertRaises(ValueError):
-                await module("profile_controls").send(c, sid, key, v)
+                await module("prod_20CL")._send(c, sid, key, v)
         self.assertEqual(c.commands, [])
 
     async def test_every_explicit_control_accepts_schema_values(self):

@@ -56,18 +56,17 @@ ZG0O 的 Profile 同时包含彩色控制，但本次只提供已验证的白光
 
 不提供区域绘制／编辑、华为 App 历史记录或恢复出厂等操作。位掩码尚未上报时不创建对应设置实体；首次回报后可重载集成以发现这些实体。
 
-## 代码组织与公共平台变更
+## 单品适配器与平台依赖
 
-- 每个产品有独立 `prod_<prodId>.py` 入口，大小写不敏感匹配。
-- `profile_controls.py` 提供显式字段校验及小型实体工厂；它不自行扫描 Profile 创建设备能力。
-- `profile_lights.py` / `profile_curtains.py` 仅供这次明确列举的型号复用。
-- ZG0F 的几何、位掩码、区域设置分别在 `radar_map.py`、`radar_options.py`、`radar_tuning.py`。
-- `cover.py` / `humidifier.py` 读取适配器 `device_class` 元数据。
-- `sensor.py` 支持适配器附加属性及可选的字段回报时间戳。未声明该元数据的传感器行为保持原样；监听器在实体移除时注销。
+- 21 个 `prod_<prodId>.py` 均独立实现服务映射、读取换算、校验与命令，不依赖其他单品适配器或新增公共辅助实现。各型号仅依赖既有 `api.EntitySpec`。
+- 字段和命令由各文件明确声明；Profile 仅用于核对该型号字段的权限、范围、步长和枚举，不扫描任意字段生成实体。
+- ZG0F 的几何解析、位掩码、区域响应实现全部位于 `prod_ZG0F.py`。
+- 本适配器 PR 不修改 `cover.py`、`humidifier.py`、`sensor.py`。平台元数据支持及独立测试见 [实体工厂 PR #134](https://github.com/xiasi0/ha-huawei-smarthome/pull/134)。
+- 基础实体和控制可在既有平台工厂下工作；窗帘/除湿机的 `device_class`，以及 ZG0F 的区域坐标附加属性和字段接收时间戳，需要实体工厂 PR 合并后才会在 HA 中呈现。建议先合并实体工厂 PR；实体工厂本身不依赖这 21 个适配器。
 
 ## 运行回归测试
 
-只测试协议层（无需 Home Assistant，4 项 HA 平台测试会跳过）：
+只测试协议层（无需 Home Assistant，1 项 HA 实体构造测试会跳过）：
 
 ```bash
 python3 -m unittest discover -s tests -v
