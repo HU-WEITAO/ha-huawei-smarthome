@@ -124,7 +124,3 @@
 ## 维护规则
 
 新增单品时，在 `custom_components/huawei_smarthome/device_adapters/` 增加对应的 `prod_<prodId>.py`，并同步更新本表。重复 `prodId` 不应新增第二个适配器文件。
-
-本次新增产品的功能范围与验证说明见 [适配说明](adapters/verified-products.md)。
-
-新增产品名称与类型按官方 Product Profile 核对；20CL、27WB 的 manufacturerName 为空，2N91 的对应字段为企业介绍，对应厂商／品牌栏经设备持有人确认，分别填写华为、博孚、佳普乐（2026-09-22），不将此补充信息视为官方 Profile 已填写的生产企业名称。28RD 为通断器，本次 light 实体用于其已验证的照明负载，产品类型仍标为智能开关。
