@@ -1,6 +1,6 @@
 """Independent 2N91 adapter with explicit product service mappings.
 
-See docs/adapters/verified-products.md for verified behavior and limitations.
+Field mappings and command validation are local to this product.
 """
 
 import math
