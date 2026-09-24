@@ -8,10 +8,13 @@ Profile（profiles/X0A0.json）:
    speakerState.State     enum R     0=待机中 1=拾音中 2=等待响应 3=语音播报
 
 本适配器暴露一个 media_player：播放 / 暂停 / 停止 / 上一首 / 下一首。
-注: Profile 的 enumList 把「上一首」与「下一首」都写成 2（官方资料笔误）；
-    真机验证 3 才是「下一首」（2=上一首）→ previous=2 / next=3。
-    音量字段在 X0A0 的 Profile 与真机上报里都不明确（`speaker` 只报 equalizer、
-    `sleepHelp.volume` 是睡眠辅助音量）→ 不暴露音量。
+真机实测修正（官方 Profile 有两处笔误）:
+- playControl 的 enumList 把「上一首」「下一首」都写成 2；实测 3 才是「下一首」。
+- audioplayer.playState 虽标 RW，但写它一律被云端拒绝（errcode=-1）→ 暂停/停止只能走
+  smartspeaker.playControl=0（资料写「停止播放」，实测效果=暂停，且能被 =1 恢复播放）；
+  设备没有独立的「停止」态，故 pause 与 stop 同效。
+- 音量字段在 X0A0 的 Profile 与真机上报里都不明确（`speaker` 只报 equalizer、
+  `sleepHelp.volume` 是睡眠辅助音量）→ 不暴露音量。
 """
 from __future__ import annotations
 
@@ -40,10 +43,8 @@ async def _play(device: DeviceContext, _data: Mapping[str, Any]) -> None:
 
 
 async def _pause(device: DeviceContext, _data: Mapping[str, Any]) -> None:
-    await device.async_send_service("audioplayer", {"playState": 0})
-
-
-async def _stop(device: DeviceContext, _data: Mapping[str, Any]) -> None:
+    # 真机实测：写 audioplayer.playState 一律被云端拒（errcode=-1），
+    # 暂停只能走 smartspeaker.playControl=0（资料叫「停止播放」，实际=暂停，可被 =1 恢复）
     await device.async_send_service("smartspeaker", {"playControl": 0})
 
 
@@ -80,7 +81,7 @@ class ProductX0A0Adapter:
                 key="speaker",
                 name=None,
                 state=player_state,
-                actions={"play": _play, "pause": _pause, "stop": _stop,
+                actions={"play": _play, "pause": _pause, "stop": _pause,   # 设备无独立停止态
                          "previous": _previous_track, "next": _next_track},
             ),
         )
