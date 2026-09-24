@@ -3,14 +3,15 @@
 设备类型: 华为 AI 音箱（FLMG-10；实测 2 台，左/右声道 stereo 配对）
 制造商: 华为
 Profile（profiles/X0A0.json）:
-   smartspeaker.playControl enum RW  0=停止播放 1=启动播放 2=上一首/下一首
+   smartspeaker.playControl enum RW  0=停止播放 1=启动播放 2=上一首 3=下一首
    audioplayer.playState  enum RW    0=暂停 1=播放中 2=停止
    speakerState.State     enum R     0=待机中 1=拾音中 2=等待响应 3=语音播报
 
-本适配器暴露一个 media_player：播放 / 暂停 / 停止。
-注: playControl=2 在资料里上一首与下一首**共用同一枚举值**，无法可靠区分 → 不暴露跳曲，
-    避免误操作（同上游 X0A2 的处理）。音量字段在 X0A0 的 Profile 与真机上报里都不明确
-    （`speaker` 只报 equalizer，`sleepHelp.volume` 是睡眠辅助音量）→ 不暴露音量。
+本适配器暴露一个 media_player：播放 / 暂停 / 停止 / 上一首 / 下一首。
+注: Profile 的 enumList 把「上一首」与「下一首」都写成 2（官方资料笔误）；
+    真机验证 3 才是「下一首」（2=上一首）→ previous=2 / next=3。
+    音量字段在 X0A0 的 Profile 与真机上报里都不明确（`speaker` 只报 equalizer、
+    `sleepHelp.volume` 是睡眠辅助音量）→ 不暴露音量。
 """
 from __future__ import annotations
 
@@ -46,6 +47,14 @@ async def _stop(device: DeviceContext, _data: Mapping[str, Any]) -> None:
     await device.async_send_service("smartspeaker", {"playControl": 0})
 
 
+async def _previous_track(device: DeviceContext, _data: Mapping[str, Any]) -> None:
+    await device.async_send_service("smartspeaker", {"playControl": 2})
+
+
+async def _next_track(device: DeviceContext, _data: Mapping[str, Any]) -> None:
+    await device.async_send_service("smartspeaker", {"playControl": 3})
+
+
 class ProductX0A0Adapter:
     """X0A0 华为 AI 音箱：一个 media_player。"""
 
@@ -71,7 +80,8 @@ class ProductX0A0Adapter:
                 key="speaker",
                 name=None,
                 state=player_state,
-                actions={"play": _play, "pause": _pause, "stop": _stop},
+                actions={"play": _play, "pause": _pause, "stop": _stop,
+                         "previous": _previous_track, "next": _next_track},
             ),
         )
 
